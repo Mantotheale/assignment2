@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use hmac::Hmac;
@@ -13,6 +12,7 @@ pub use register_client_public::*;
 pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::register_client::SimpleRegisterClient;
+use crate::registers_manager::RegistersManager;
 use crate::transfer::{OperationError, OperationResult, RegisterResponse, serialize_register_response};
 
 mod domain;
@@ -23,6 +23,7 @@ mod register_client_public;
 
 mod register_client;
 mod transfer;
+mod registers_manager;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -37,22 +38,23 @@ pub async fn run_register_process(config: Configuration) {
 
     let listener = TcpListener::bind((location.0.as_str(), location.1)).await.unwrap();
 
-    let active_registers: Arc<Mutex<HashMap<SectorIdx, Arc<Mutex<Box<dyn AtomicRegister>>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let registers_manager = Arc::new(Mutex::new(
+        RegistersManager::build(
+            config.public.self_rank,
+            register_client, sectors_manager,
+            config.public.tcp_locations.len() as u8
+        )
+    ));
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
-        println!("Ho accettato richiesta");
 
         tokio::spawn(handle_stream(
             stream,
             system_key.clone(),
             client_key.clone(),
-            config.public.self_rank,
-            register_client.clone(),
-            sectors_manager.clone(),
-            config.public.tcp_locations.len() as u8,
+            registers_manager.clone(),
             config.public.n_sectors,
-            active_registers.clone()
         ));
     }
 }
@@ -60,12 +62,8 @@ pub async fn run_register_process(config: Configuration) {
 async fn handle_stream(stream: TcpStream,
                        system_key: Arc<[u8; 64]>,
                        client_key: Arc<[u8; 32]>,
-                       self_ident: u8,
-                       register_client: Arc<dyn RegisterClient>,
-                       sectors_manager: Arc<dyn SectorsManager>,
-                       processes_count: u8,
-                       n_sectors: u64,
-                       active_registers: Arc<Mutex<HashMap<SectorIdx, Arc<Mutex<Box<dyn AtomicRegister>>>>>>) {
+                       registers_manager: Arc<Mutex<RegistersManager>>,
+                       n_sectors: u64) {
     let (mut read_stream, write_stream) = stream.into_split();
     let write_stream = Arc::new(Mutex::new(write_stream));
 
@@ -76,8 +74,6 @@ async fn handle_stream(stream: TcpStream,
             return;
         }
 
-        println!("La stream non è chiusa");
-
         let (command, is_valid) = extract_next_command(&mut read_stream, &system_key, &client_key.clone()).await;
         let idx = extract_index(&command);
 
@@ -85,34 +81,14 @@ async fn handle_stream(stream: TcpStream,
             continue;
         }
 
-        println!("Il comando è {:?}", command);
-
-        let register;
-        {
-            let mut active_registers = active_registers.lock().await;
-
-            register = if let Some(r) = active_registers.get(&idx) {
-                println!("Il registro esisteva già");
-
-                r.clone()
-            } else {
-                println!("Il registro non esisteva ancora");
-
-                let r = Arc::new(Mutex::new(build_atomic_register(
-                    self_ident, idx, register_client.clone(), sectors_manager.clone(), processes_count
-                ).await));
-
-                active_registers.insert(idx, r.clone());
-                r
-            };
-        }
-
-        println!("Ottenuto il registro");
+        let register = registers_manager.lock().await.get(&idx).await;
 
         match command {
             RegisterCommand::Client(command) => {
                 let client_key = client_key.clone();
                 let write_stream = write_stream.clone();
+                let registers_manager = registers_manager.clone();
+                let sector_idx = Arc::new(idx);
                 register.lock().await.deref_mut().client_command(command, Box::new(|success| Box::pin(
                     async move {
                         let response = match &success.op_return {
@@ -120,15 +96,14 @@ async fn handle_stream(stream: TcpStream,
                             OperationReturn::Write => RegisterResponse::WriteResponse(OperationResult::Return(success)),
                         };
 
-                        println!("{:?}", response);
-
+                        registers_manager.lock().await.remove(sector_idx.deref());
                         serialize_register_response(&response, write_stream.lock().await.deref_mut(), client_key.deref()).await.unwrap();
-                        println!("SUS");
                     }
                 ))).await
             },
             RegisterCommand::System(command) => {
                 register.lock().await.deref_mut().system_command(command).await;
+                registers_manager.lock().await.remove(&idx);
             }
         }
     }

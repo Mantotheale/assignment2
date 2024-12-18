@@ -114,7 +114,6 @@ async fn serialize_deserialize_is_identity_write() {
         .expect("Could not serialize?");
     let mut slice: &[u8] = &sink[..];
 
-    println!("{:?}", slice);
     let data_read: &mut (dyn tokio::io::AsyncRead + Send + Unpin) = &mut slice;
     let (deserialized_cmd, hmac_valid) =
         deserialize_register_command(data_read, &[0x00_u8; 64], &[0x00_u8; 32])
@@ -142,7 +141,6 @@ async fn serialize_deserialize_is_identity_write() {
     serialize_register_command(&deserialized_cmd, &mut sink, &[0x00_u8; 32])
         .await
         .expect("Could not serialize?");
-    println!("{:?}", sink)
 }
 
 #[tokio::test]
