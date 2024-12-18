@@ -11,7 +11,7 @@ pub use atomic_register_public::*;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
 pub use transfer_public::*;
-use crate::register_client::SimpleRegisterClient;
+use crate::stubborn_register_client::StubbornRegisterClient;
 use crate::registers_manager::RegistersManager;
 use crate::transfer::{OperationError, OperationResult, RegisterResponse, serialize_register_response};
 
@@ -21,7 +21,7 @@ mod atomic_register_public;
 mod sectors_manager_public;
 mod register_client_public;
 
-mod register_client;
+mod stubborn_register_client;
 mod transfer;
 mod registers_manager;
 
@@ -32,7 +32,7 @@ pub async fn run_register_process(config: Configuration) {
     let client_key = Arc::new(config.hmac_client_key);
 
     let sectors_manager = build_sectors_manager(config.public.storage_dir).await;
-    let register_client = Arc::new(SimpleRegisterClient::build(config.public.tcp_locations.clone(), system_key.clone()));
+    let register_client = Arc::new(StubbornRegisterClient::build(config.public.tcp_locations.clone(), system_key.clone()));
 
     let location = config.public.tcp_locations.get((config.public.self_rank - 1) as usize).unwrap();
 
