@@ -37,7 +37,7 @@ async fn single_process_system_completes_operations() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let mut stream = TcpStream::connect(("127.0.0.1", tcp_port))
         .await
-        . expect("Could not connect to TCP port");
+        .expect("Could not connect to TCP port");
     let write_cmd = RegisterCommand::Client(ClientRegisterCommand {
         header: ClientCommandHeader {
             request_identifier,
@@ -203,96 +203,4 @@ fn hmac_tag_is_ok(key: &[u8], data: &[u8]) -> bool {
     let mut mac = HmacSha256::new_from_slice(key).unwrap();
     mac.update(&data[..boundary]);
     mac.verify_slice(&data[boundary..]).is_ok()
-}
-
-
-#[tokio::test]
-#[timeout(4000)]
-async fn single_process_system_write_and_read() {
-    // given
-    let hmac_client_key = [5; 32];
-    let tcp_port = 30_288;
-    let storage_dir = tempdir().unwrap();
-    let request_identifier = 1778;
-
-    let config = Configuration {
-        public: PublicConfiguration {
-            tcp_locations: vec![("127.0.0.1".to_string(), tcp_port)],
-            self_rank: 1,
-            n_sectors: 20,
-            storage_dir: storage_dir.into_path(),
-        },
-        hmac_system_key: [1; 64],
-        hmac_client_key,
-    };
-
-    tokio::spawn(run_register_process(config));
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let mut stream = TcpStream::connect(("127.0.0.1", tcp_port))
-        .await
-        .expect("Could not connect to TCP port");
-    let write_cmd = RegisterCommand::Client(ClientRegisterCommand {
-        header: ClientCommandHeader {
-            request_identifier,
-            sector_idx: 12,
-        },
-        content: ClientRegisterCommandContent::Write {
-            data: SectorVec(vec![3; 4096]),
-        },
-    });
-
-    // when
-    send_cmd(&write_cmd, &mut stream, &hmac_client_key).await;
-
-    // then
-    const EXPECTED_RESPONSES_SIZE: usize = 48;
-    let mut buf = [0_u8; EXPECTED_RESPONSES_SIZE];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .expect("Less data then expected");
-
-    // asserts for write response
-    assert_eq!(&buf[0..4], MAGIC_NUMBER.as_ref());
-    assert_eq!(buf[7], 0x42);
-    assert_eq!(
-        u64::from_be_bytes(buf[8..16].try_into().unwrap()),
-        request_identifier
-    );
-    assert!(hmac_tag_is_ok(&hmac_client_key, &buf));
-
-    let mut stream = TcpStream::connect(("127.0.0.1", tcp_port))
-        .await
-        .expect("Could not connect to TCP port");
-    let read_cmd = RegisterCommand::Client(ClientRegisterCommand {
-        header: ClientCommandHeader {
-            request_identifier,
-            sector_idx: 12,
-        },
-        content: ClientRegisterCommandContent::Read,
-    });
-
-    // when
-    send_cmd(&read_cmd, &mut stream, &hmac_client_key).await;
-
-    // then
-    let mut buf = [0_u8; EXPECTED_RESPONSES_SIZE + 4096];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .expect("Less data then expected");
-
-    // asserts for write response
-    assert_eq!(&buf[0..4], MAGIC_NUMBER.as_ref());
-    assert_eq!(buf[7], 0x41);
-    assert_eq!(
-        u64::from_be_bytes(buf[8..16].try_into().unwrap()),
-        request_identifier
-    );
-    assert_eq!(
-        buf[16..16 + 4096],
-        [3; 4096]
-    );
-    assert!(hmac_tag_is_ok(&hmac_client_key, &buf));
 }

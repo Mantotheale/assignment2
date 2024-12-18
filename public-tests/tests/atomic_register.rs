@@ -24,7 +24,7 @@ async fn read_triggers_broadcast() {
         build_sectors_manager(root_drive_dir.into_path()).await,
         1,
     )
-        .await;
+    .await;
 
     // when
     register
@@ -70,7 +70,7 @@ async fn majority_completes_operations_after_crash() {
         },
         Box::new(|_op_c| Box::pin(async move { tx_op_c.send(()).await.unwrap() })),
     )
-        .await;
+    .await;
 
     registers.get_mut(2).unwrap().take();
 
@@ -108,7 +108,7 @@ async fn operations_are_not_completed_without_majority() {
         },
         Box::new(|_op_c| Box::pin(async move { tx_op_c.send(()).await.unwrap() })),
     )
-        .await;
+    .await;
 
     registers.get_mut(1).unwrap().take();
     registers.get_mut(2).unwrap().take();

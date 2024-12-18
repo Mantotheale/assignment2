@@ -5,11 +5,9 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::{SectorIdx, SectorsManager, SectorVec};
 
-pub mod sectors_manager_public;
-
 const SECTOR_SIZE: usize = 4096;
 
-struct StableSectorsManager {
+pub struct StableSectorsManager {
     dir: PathBuf
 }
 
@@ -26,7 +24,7 @@ impl SectorsManager for StableSectorsManager {
             file.read_exact(&mut vec_buf).await.unwrap();
         }
 
-        crate::domain::SectorVec {
+        SectorVec {
             0: vec_buf.to_vec(),
         }
     }
@@ -67,6 +65,33 @@ impl SectorsManager for StableSectorsManager {
         write_file(&tmp_path, &dir, tmp_content.as_slice()).await;
         write_file(&dest_path, &dir, content.as_slice()).await;
         remove_file(&tmp_path, &dir).await;
+    }
+}
+
+impl StableSectorsManager {
+    pub async fn build(path: PathBuf) -> Self {
+        let mut paths = tokio::fs::read_dir(path.clone()).await.unwrap();
+
+        while let Ok(Some(entry)) = paths.next_entry().await {
+            let entry_name = entry.file_name();
+            let file_name = entry_name.to_str().unwrap();
+
+            if file_name.starts_with("tmp_") {
+                let tmp_path = entry.path();
+                let dir = File::open(path.clone()).await.unwrap();
+
+                if let Ok(content) = read_hash_content(&tmp_path).await {
+                    let dst_path = path.join(&file_name[4..]);
+                    write_file(&dst_path, &dir, &content).await;
+                }
+
+                remove_file(&tmp_path, &dir).await;
+            }
+        }
+
+        Self {
+            dir: path
+        }
     }
 }
 

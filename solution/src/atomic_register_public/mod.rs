@@ -2,7 +2,9 @@ use crate::{ClientRegisterCommand, OperationSuccess, RegisterClient, SectorIdx, 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::atomic_register::CustomAtomicRegister;
+use custom_register::CustomAtomicRegister;
+
+mod custom_register;
 
 #[async_trait::async_trait]
 pub trait AtomicRegister: Send + Sync {

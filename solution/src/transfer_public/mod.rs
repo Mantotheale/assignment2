@@ -1,13 +1,10 @@
 use std::collections::VecDeque;
-use crate::{ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, MAGIC_NUMBER, RegisterCommand, SectorVec, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
+use crate::{ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, HmacSha256, MAGIC_NUMBER, RegisterCommand, SectorVec, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
 use std::io::{Error};
 use std::io::ErrorKind::InvalidInput;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use hmac::Mac;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
-
-pub(crate) type HmacSha256 = Hmac<Sha256>;
 
 const SECTOR_SIZE: usize = 4096;
 
@@ -85,7 +82,7 @@ async fn extract_bytes(reader: &mut (dyn AsyncRead + Send + Unpin),
 }
 
 async fn client_command_content(reader: &mut (dyn AsyncRead + Send + Unpin), op_type: u8)
-    -> Result<ClientRegisterCommandContent, Error> {
+                                -> Result<ClientRegisterCommandContent, Error> {
     if op_type == 0x01 {
         Ok(ClientRegisterCommandContent::Read)
     } else {
@@ -164,14 +161,14 @@ async fn deserialize_system_command(
 
     Ok((
         RegisterCommand::System(
-        SystemRegisterCommand {
-            header: SystemCommandHeader {
-                process_identifier,
-                msg_ident,
-                sector_idx,
-            },
-            content: system_command_content(reader, op_type).await?
-        }),
+            SystemRegisterCommand {
+                header: SystemCommandHeader {
+                    process_identifier,
+                    msg_ident,
+                    sector_idx,
+                },
+                content: system_command_content(reader, op_type).await?
+            }),
         message.is_valid(hmac_key)
     ))
 }
