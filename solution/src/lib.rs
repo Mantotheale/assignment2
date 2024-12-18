@@ -5,6 +5,7 @@ use hmac::Hmac;
 use sha2::Sha256;
 use tokio::io::AsyncRead;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
 pub use domain::*;
 pub use atomic_register_public::*;
@@ -12,7 +13,7 @@ pub use register_client_public::*;
 pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::register_client::SimpleRegisterClient;
-use crate::transfer::{OperationResult, RegisterResponse, serialize_register_response};
+use crate::transfer::{OperationError, OperationResult, RegisterResponse, serialize_register_response};
 
 mod domain;
 mod transfer_public;
@@ -50,6 +51,7 @@ pub async fn run_register_process(config: Configuration) {
             register_client.clone(),
             sectors_manager.clone(),
             config.public.tcp_locations.len() as u8,
+            config.public.n_sectors,
             active_registers.clone()
         ));
     }
@@ -62,12 +64,13 @@ async fn handle_stream(stream: TcpStream,
                        register_client: Arc<dyn RegisterClient>,
                        sectors_manager: Arc<dyn SectorsManager>,
                        processes_count: u8,
+                       n_sectors: u64,
                        active_registers: Arc<Mutex<HashMap<SectorIdx, Arc<Mutex<Box<dyn AtomicRegister>>>>>>) {
     let (mut read_stream, write_stream) = stream.into_split();
     let write_stream = Arc::new(Mutex::new(write_stream));
 
     loop {
-        // todo: RICORDARSI DI GESTIRE CASI IDX O MAC INVALIDI
+        // todo: RICORDARSI DI GESTIRE CASI IDX INVALIDI
         let mut buf = [0u8; 1];
         if let Ok(0) = read_stream.peek(&mut buf).await {
             return;
@@ -75,9 +78,12 @@ async fn handle_stream(stream: TcpStream,
 
         println!("La stream non è chiusa");
 
-
-        let (command, _) = extract_next_command(&mut read_stream, &system_key, &client_key.clone()).await;
+        let (command, is_valid) = extract_next_command(&mut read_stream, &system_key, &client_key.clone()).await;
         let idx = extract_index(&command);
+
+        if !is_command_ok(&command, is_valid, idx, n_sectors, write_stream.clone(), client_key.clone()).await {
+            continue;
+        }
 
         println!("Il comando è {:?}", command);
 
@@ -145,4 +151,36 @@ fn extract_index(command: &RegisterCommand) -> SectorIdx {
         RegisterCommand::Client(cmd) => cmd.header.sector_idx,
         RegisterCommand::System(cmd) => cmd.header.sector_idx
     }
+}
+
+async fn is_command_ok(command: &RegisterCommand,
+                       is_hmac_valid: bool,
+                       sector_idx: SectorIdx,
+                       n_sectors: u64,
+                       stream: Arc<Mutex<OwnedWriteHalf>>,
+                       client_key: Arc<[u8; 32]>) -> bool {
+    if is_hmac_valid && sector_idx < n_sectors {
+        return true;
+    }
+
+    if let RegisterCommand::Client(command) = &command  {
+        let req_id = command.header.request_identifier;
+
+        let err = if !is_hmac_valid {
+            OperationError::InvalidMac(req_id)
+        } else {
+            OperationError::InvalidSector(req_id)
+        };
+
+        let err = OperationResult::Error(err);
+
+        let response = match command.content {
+            ClientRegisterCommandContent::Read => RegisterResponse::ReadResponse(err),
+            ClientRegisterCommandContent::Write { .. } => RegisterResponse::WriteResponse(err)
+        };
+
+        serialize_register_response(&response, stream.lock().await.deref_mut(), client_key.deref()).await.unwrap();
+    }
+
+    false
 }
