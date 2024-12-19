@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::{AtomicRegister, Broadcast, ClientRegisterCommand, ClientRegisterCommandContent, OperationReturn, OperationSuccess, ReadReturn, RegisterClient, SectorIdx, SectorsManager, SectorVec, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
+use crate::{AtomicRegister, Broadcast, ClientRegisterCommand, ClientRegisterCommandContent, OperationReturn, OperationSuccess, ReadReturn, RegisterClient, SectorIdx, SectorsManager, SectorVec, SuccessCallbackType, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
 
 struct RegisterOperation {
     request_number: u64,
@@ -33,8 +33,6 @@ pub struct CustomAtomicRegister {
 
     active_operations: HashMap<Uuid, RegisterOperation>
 }
-
-type SuccessCallbackType = Box<dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output=()> + Send>> + Send + Sync>;
 
 #[async_trait::async_trait]
 impl AtomicRegister for CustomAtomicRegister {
