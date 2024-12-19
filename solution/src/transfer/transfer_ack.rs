@@ -48,10 +48,11 @@ pub async fn deserialize_ack(
         _ => return Err(Error::from(InvalidInput))
     };
 
-    let msg_ident = data.read_u128().await?;
+    let mut msg_content = [0u8; 48];
+    data.read_exact(&mut msg_content).await?;
 
-    let mut hmac_tag = [0u8; 32];
-    data.read_exact(&mut hmac_tag).await?;
+    let msg_ident = u128::from_be_bytes(msg_content[..16].try_into().unwrap());
+    let hmac_tag = &msg_content[16..];
 
     let content = [
         window.make_contiguous(),
@@ -69,7 +70,7 @@ pub async fn deserialize_ack(
 
     let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
     mac.update(content.as_slice());
-    let is_valid = mac.verify_slice(hmac_tag.as_slice()).is_ok();
+    let is_valid = mac.verify_slice(&hmac_tag).is_ok();
 
     Ok((ack, is_valid))
 }

@@ -13,7 +13,7 @@ pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::stubborn_register_client::StubbornRegisterClient;
 use crate::registers_manager::RegistersManager;
-use crate::transfer::{OperationError, OperationResult, RegisterResponse, serialize_register_response};
+use crate::transfer::{Acknowledgment, MessageType, OperationError, OperationResult, RegisterResponse, serialize_ack, serialize_register_response};
 
 mod domain;
 mod transfer_public;
@@ -55,6 +55,7 @@ pub async fn run_register_process(config: Configuration) {
             client_key.clone(),
             registers_manager.clone(),
             config.public.n_sectors,
+            config.public.self_rank
         ));
     }
 }
@@ -63,12 +64,12 @@ async fn handle_stream(stream: TcpStream,
                        system_key: Arc<[u8; 64]>,
                        client_key: Arc<[u8; 32]>,
                        registers_manager: Arc<Mutex<RegistersManager>>,
-                       n_sectors: u64) {
+                       n_sectors: u64,
+                       rank: u8) {
     let (mut read_stream, write_stream) = stream.into_split();
     let write_stream = Arc::new(Mutex::new(write_stream));
 
     loop {
-        // todo: RICORDARSI DI GESTIRE CASI IDX INVALIDI
         let mut buf = [0u8; 1];
         if let Ok(0) = read_stream.peek(&mut buf).await {
             return;
@@ -102,8 +103,21 @@ async fn handle_stream(stream: TcpStream,
                 ))).await
             },
             RegisterCommand::System(command) => {
-                register.lock().await.deref_mut().system_command(command).await;
+                register.lock().await.deref_mut().system_command(command.clone()).await;
                 registers_manager.lock().await.remove(&idx);
+
+                let ack = Acknowledgment {
+                    msg_type: match command.content {
+                        SystemRegisterCommandContent::ReadProc => MessageType::ReadProc,
+                        SystemRegisterCommandContent::Value { .. } => MessageType::Value,
+                        SystemRegisterCommandContent::WriteProc { .. } => MessageType::WriteProc,
+                        SystemRegisterCommandContent::Ack => MessageType::Ack
+                    },
+                    process_rank: rank,
+                    msg_ident: command.header.msg_ident,
+                };
+
+                serialize_ack(&ack, write_stream.lock().await.deref_mut(), system_key.clone().deref()).await.unwrap();
             }
         }
     }

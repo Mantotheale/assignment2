@@ -3,6 +3,7 @@ use crate::{Broadcast, RegisterClient};
 use crate::stubborn_register_client::stubborn_link::StubbornLink;
 
 mod stubborn_link;
+mod timer;
 
 pub struct StubbornRegisterClient {
     links: Vec<StubbornLink>
@@ -12,7 +13,7 @@ pub struct StubbornRegisterClient {
 impl RegisterClient for StubbornRegisterClient {
     async fn send(&self, msg: crate::Send) {
         let link = self.links.get(msg.target as usize - 1).unwrap();
-        link.send_msg(msg.cmd);
+        link.add_msg(msg.cmd).await;
     }
 
     async fn broadcast(&self, msg: Broadcast) {
@@ -26,8 +27,8 @@ impl StubbornRegisterClient {
     pub fn build(locations: Vec<(String, u16)>, key: Arc<[u8; 64]>) -> Self {
         let mut links = Vec::new();
 
-        for (address, port) in locations.iter() {
-            links.push(StubbornLink::build(address.clone(), *port, key.clone()));
+        for target in 1..locations.len() + 1 {
+            links.push(StubbornLink::build(target as u8, locations.clone(), key.clone()));
         }
 
         Self {
