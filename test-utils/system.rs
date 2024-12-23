@@ -40,10 +40,10 @@ pub enum RegisterResponseContent {
 }
 
 pub struct TestProcessesConfig {
-    hmac_client_key: Vec<u8>,
-    hmac_system_key: Vec<u8>,
+    pub hmac_client_key: Vec<u8>,
+    pub hmac_system_key: Vec<u8>,
     storage_dirs: Vec<TempDir>,
-    tcp_locations: Vec<(String, u16)>,
+    pub tcp_locations: Vec<(String, u16)>,
 }
 
 impl TestProcessesConfig {
@@ -66,7 +66,7 @@ impl TestProcessesConfig {
         }
     }
 
-    fn config(&self, proc_idx: usize) -> Configuration {
+    pub fn config(&self, proc_idx: usize) -> Configuration {
         Configuration {
             public: PublicConfiguration {
                 storage_dir: self

@@ -12,7 +12,7 @@ use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[timeout(4000)]
 async fn single_process_system_completes_operations() {
     // given
@@ -69,7 +69,7 @@ async fn single_process_system_completes_operations() {
     assert!(hmac_tag_is_ok(&hmac_client_key, &buf));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(30000)]
 async fn concurrent_operations_on_the_same_sector() {
@@ -126,7 +126,7 @@ async fn concurrent_operations_on_the_same_sector() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[serial_test::serial]
 #[timeout(40000)]
 async fn large_number_of_operations_execute_successfully() {
