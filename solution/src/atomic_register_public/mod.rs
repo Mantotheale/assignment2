@@ -2,10 +2,9 @@ use crate::{ClientRegisterCommand, OperationSuccess, RegisterClient, SectorIdx, 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::atomic_register_public::custom_register::RegisterHandler;
+use crate::atomic_register_public::custom_register::CustomRegister;
 
 mod custom_register;
-mod cs_register;
 
 #[async_trait::async_trait]
 pub trait AtomicRegister: Send + Sync {
@@ -45,7 +44,7 @@ pub async fn build_atomic_register(
     sectors_manager: Arc<dyn SectorsManager>,
     processes_count: u8
 ) -> Box<dyn AtomicRegister> {
-    Box::new(RegisterHandler::build(
+    Box::new(CustomRegister::build(
         sector_idx, self_ident, processes_count, register_client, sectors_manager
     ).await)
 }
