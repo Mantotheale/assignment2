@@ -15,7 +15,7 @@ pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::stubborn_register_client::StubbornRegisterClient;
 use crate::registers_manager::RegistersManager;
-use crate::transfer::{Acknowledgment, MessageType, OperationError, OperationResult, RegisterResponse, serialize_ack, serialize_register_response};
+use crate::transfer::{Acknowledgment, OperationError, OperationResult, RegisterResponse, serialize_ack, serialize_register_response};
 
 mod domain;
 mod transfer_public;
@@ -132,16 +132,7 @@ async fn handle_stream(stream: TcpStream,
             RegisterCommand::System(command) => {
                 let system_success_tx = system_success_tx.clone();
 
-                let ack = Arc::new(Acknowledgment {
-                    msg_type: match command.content {
-                        SystemRegisterCommandContent::ReadProc => MessageType::ReadProc,
-                        SystemRegisterCommandContent::Value { .. } => MessageType::Value,
-                        SystemRegisterCommandContent::WriteProc { .. } => MessageType::WriteProc,
-                        SystemRegisterCommandContent::Ack => MessageType::Ack
-                    },
-                    process_rank: rank,
-                    msg_ident: command.header.msg_ident,
-                });
+                let ack = Arc::new(Acknowledgment::from_cmd(command.clone(), rank));
 
                 let callback: SystemCallbackType = Box::new(|| Box::pin(async move {
                     system_success_tx.send(*ack.deref()).unwrap()

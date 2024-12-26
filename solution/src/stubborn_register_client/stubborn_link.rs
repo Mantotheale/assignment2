@@ -5,9 +5,9 @@ use tokio::sync::Mutex;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use crate::{RegisterCommand, serialize_register_command, SystemRegisterCommand, SystemRegisterCommandContent};
+use crate::{RegisterCommand, serialize_register_command, SystemRegisterCommand};
 use crate::stubborn_register_client::timer::TimerHandle;
-use crate::transfer::{Acknowledgment, deserialize_ack, MessageType};
+use crate::transfer::{Acknowledgment, deserialize_ack};
 
 #[derive(Clone)]
 pub struct StubbornLink {
@@ -35,16 +35,7 @@ impl StubbornLink {
     }
 
     pub async fn add_msg(&self, msg: Arc<SystemRegisterCommand>) {
-        let ack = Acknowledgment {
-            msg_type: match msg.content {
-                SystemRegisterCommandContent::ReadProc => MessageType::ReadProc,
-                SystemRegisterCommandContent::Value { .. } => MessageType::Value,
-                SystemRegisterCommandContent::WriteProc { .. } => MessageType::WriteProc,
-                SystemRegisterCommandContent::Ack => MessageType::Ack
-            },
-            process_rank: self.target_rank,
-            msg_ident: msg.header.msg_ident,
-        };
+        let ack = Acknowledgment::from_cmd(msg.deref().clone(), self.target_rank);
         
         let timer = TimerHandle::start_timer(msg, self.msg_tx.clone());
         self.pending_acks.lock().await.insert(ack, timer);
