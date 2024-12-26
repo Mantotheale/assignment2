@@ -1,11 +1,56 @@
-use std::cmp::{Ordering, PartialEq};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use crate::{Broadcast, ClientRegisterCommand, ClientRegisterCommandContent, OperationReturn, OperationSuccess, ReadReturn, RegisterClient, SectorIdx, SectorsManager, SectorVec, SuccessCallbackType, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::{AtomicRegister, Broadcast, ClientRegisterCommand, ClientRegisterCommandContent, OperationReturn, OperationSuccess, ReadReturn, RegisterClient, SectorIdx, SectorsManager, SectorVec, SuccessCallbackType, SystemCommandHeader, SystemRegisterCommand, SystemRegisterCommandContent};
+
+#[async_trait::async_trait]
+pub trait AtomicRegister: Send + Sync {
+    /// Handle a client command. After the command is completed, we expect
+    /// callback to be called. Note that completion of client command happens after
+    /// delivery of multiple system commands to the register, as the algorithm specifies.
+    ///
+    /// This function corresponds to the handlers of Read and Write events in the
+    /// (N,N)-AtomicRegister algorithm.
+    async fn client_command(
+        &mut self,
+        cmd: ClientRegisterCommand,
+        success_callback: Box<
+            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>>
+            + Send
+            + Sync,
+        >,
+    );
+
+    /// Handle a system command.
+    ///
+    /// This function corresponds to the handlers of READ_PROC, VALUE, WRITE_PROC
+    /// and ACK messages in the (N,N)-AtomicRegister algorithm.
+    async fn system_command(&mut self, cmd: SystemRegisterCommand);
+}
+
+/// Idents are numbered starting at 1 (up to the number of processes in the system).
+/// Communication with other processes of the system is to be done by register_client.
+/// And sectors must be stored in the sectors_manager instance.
+///
+/// This function corresponds to the handlers of Init and Recovery events in the
+/// (N,N)-AtomicRegister algorithm.
+pub async fn build_atomic_register(
+    self_ident: u8,
+    sector_idx: SectorIdx,
+    register_client: Arc<dyn RegisterClient>,
+    sectors_manager: Arc<dyn SectorsManager>,
+    processes_count: u8
+) -> Box<dyn AtomicRegister> {
+    Box::new(CustomRegister::build(
+        sector_idx, self_ident, processes_count, register_client, sectors_manager
+    ).await)
+}
 
 #[derive(Clone)]
-pub struct Entry {
+struct Entry {
     value: SectorVec,
     timestamp: u64,
     write_rank: u8
@@ -35,7 +80,7 @@ enum Phase {
     Updating
 }
 
-pub struct CustomRegister {
+struct CustomRegister {
     rank: u8,
     sector_idx: SectorIdx,
     num_processes: u8,
@@ -78,7 +123,7 @@ impl AtomicRegister for CustomRegister {
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
         let op_id = cmd.header.msg_ident;
         let sender_rank = cmd.header.process_identifier;
-        
+
         match cmd.content {
             SystemRegisterCommandContent::ReadProc =>
                 self.register_client.send(
@@ -91,7 +136,7 @@ impl AtomicRegister for CustomRegister {
                 self.receive_value(op_id, sender_rank, Entry { value: sector_data, timestamp, write_rank }).await,
             SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
                 let value = Entry { timestamp, write_rank, value: data_to_write };
-                
+
                 if Entry::ordering(&self.state, &value).is_lt() {
                     self.state = value;
                     self.sectors_manager.write(self.sector_idx, &self.state.tuple()).await;
@@ -101,7 +146,7 @@ impl AtomicRegister for CustomRegister {
                     crate::Send { cmd: Arc::new(self.gen_ack(op_id)), target: sender_rank }
                 ).await;
             }
-            SystemRegisterCommandContent::Ack => 
+            SystemRegisterCommandContent::Ack =>
                 self.receive_ack(op_id, sender_rank).await
         }
     }
@@ -244,11 +289,11 @@ impl CustomRegister {
         }
     }
 
-    pub async fn build(sector_idx: SectorIdx,
-                       rank: u8,
-                       num_processes: u8,
-                       register_client: Arc<dyn RegisterClient>,
-                       sectors_manager: Arc<dyn SectorsManager>) -> Self {
+    async fn build(sector_idx: SectorIdx,
+                   rank: u8,
+                   num_processes: u8,
+                   register_client: Arc<dyn RegisterClient>,
+                   sectors_manager: Arc<dyn SectorsManager>) -> Self {
         let value = sectors_manager.read_data(sector_idx).await;
         let (timestamp, write_rank) = sectors_manager.read_metadata(sector_idx).await;
 

@@ -75,7 +75,7 @@ async fn single_process_system_completes_operations() {
 async fn concurrent_operations_on_the_same_sector() {
     // given
     let port_range_start = 21518;
-    let n_clients = 16;
+    let n_clients = 64;
     let config = TestProcessesConfig::new(1, port_range_start);
     config.start().await;
     let mut streams = Vec::new();
