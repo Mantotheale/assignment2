@@ -6,7 +6,6 @@ use crate::{Broadcast, RegisterClient, SystemCallbackType, SystemRegisterCommand
 use crate::stubborn_register_client::stubborn_link::StubbornLink;
 
 mod stubborn_link;
-mod timer;
 
 pub struct StubbornRegisterClient {
     links: HashMap<u8, StubbornLink>,
@@ -43,7 +42,6 @@ impl StubbornRegisterClient {
 
         for target in 1..locations.len() + 1 {
             let target = target as u8;
-
             if target != rank {
                 links.insert(target, StubbornLink::build(target, locations.clone(), key.clone()));
             }

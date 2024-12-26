@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc};
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Sender, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::time;
 use crate::{RegisterCommand, serialize_register_command, SystemRegisterCommand};
-use crate::stubborn_register_client::timer::TimerHandle;
 use crate::transfer::{Acknowledgment, deserialize_ack};
 
 #[derive(Clone)]
@@ -21,23 +22,21 @@ impl StubbornLink {
         let (address, port) = locations.get((target_rank - 1) as usize).unwrap();
         let (msg_tx, msg_rx) = unbounded_channel();
 
-        let handler = StubbornLink {
+        let link = Self {
             pending_acks: Arc::new(Mutex::new(HashMap::new())),
             msg_tx,
             target_rank,
         };
 
-        tokio::spawn(link_background(
-            handler.clone(), msg_rx, address.clone(), *port, key
-        ));
+        tokio::spawn(link_background(link.clone(), msg_rx, address.clone(), *port, key));
 
-        handler
+        link
     }
 
     pub async fn add_msg(&self, msg: Arc<SystemRegisterCommand>) {
         let ack = Acknowledgment::from_cmd(msg.deref().clone(), self.target_rank);
         
-        let timer = TimerHandle::start_timer(msg, self.msg_tx.clone());
+        let timer = TimerHandle::start_timer(msg, self.msg_tx.clone(), Duration::from_millis(250));
         self.pending_acks.lock().await.insert(ack, timer);
     }
 
@@ -48,79 +47,121 @@ impl StubbornLink {
     }
 }
 
-async fn link_background(handler: StubbornLink,
+async fn link_background(link: StubbornLink,
                          msg_queue: UnboundedReceiver<Arc<SystemRegisterCommand>>,
                          address: String,
                          port: u16,
                          key: Arc<[u8; 64]>) {
-    let (stream_tx, stream_rx) = unbounded_channel();
-
-    tokio::spawn(send_messages(msg_queue, stream_rx, key.clone()));
+    let msg_sender = MsgSender::build(msg_queue, key.clone());
 
     loop {
-        let result = TcpStream::connect((address.as_str(), port)).await;
-        if result.is_err() { continue; }
-        let stream = result.unwrap();
+        let Ok(stream) = TcpStream::connect((address.as_str(), port)).await else { continue; };
         let (read_stream, write_stream) = stream.into_split();
 
-        stream_tx.send(write_stream).unwrap();
+        msg_sender.change_stream(write_stream);
 
-        listen_acks(handler.clone(), read_stream, key.clone()).await;
+        let mut ack_listener = AckListener { link: link.clone(), stream: read_stream, key: key.clone() };
+        ack_listener.listen_acks().await;
     }
 }
 
-async fn send_messages(mut msg_queue: UnboundedReceiver<Arc<SystemRegisterCommand>>,
-                       mut stream_rx: UnboundedReceiver<OwnedWriteHalf>,
-                       key: Arc<[u8; 64]>) {
-    let result = stream_rx.recv().await;
-    if result.is_none() { return; }
-    let mut write_stream = result.unwrap();
+struct MsgSender {
+    stream_tx: UnboundedSender<OwnedWriteHalf>
+}
 
-    loop {
-        tokio::select! {
-            biased;
-            result = stream_rx.recv() => {
-                if result.is_none() { break; }
-                write_stream = result.unwrap();
-            },
-            result = msg_queue.recv() => {
-                if result.is_none() { break; }
-                let msg = result.unwrap();
+impl MsgSender {
+    fn build(msg_queue: UnboundedReceiver<Arc<SystemRegisterCommand>>,
+             key: Arc<[u8; 64]>) -> Self {
+        let (stream_tx, stream_rx) = unbounded_channel();
 
-                let  _ = serialize_register_command(&RegisterCommand::System(msg.deref().clone()), &mut write_stream, key.clone().deref()).await;
+        tokio::spawn(Self::background(msg_queue, stream_rx, key));
+
+        Self { stream_tx }
+    }
+
+    fn change_stream(&self, stream: OwnedWriteHalf) {
+        _ = self.stream_tx.send(stream)
+    }
+
+    async fn background(mut msg_queue: UnboundedReceiver<Arc<SystemRegisterCommand>>,
+                  mut stream_rx: UnboundedReceiver<OwnedWriteHalf>,
+                  key: Arc<[u8; 64]>) {
+        let Some(mut write_stream) = stream_rx.recv().await else { return; };
+
+        loop {
+            tokio::select! {
+                biased;
+                Some(result) = stream_rx.recv() => write_stream = result,
+                Some(msg) = msg_queue.recv() => {
+                     _ = serialize_register_command(
+                        &RegisterCommand::System(msg.deref().clone()),
+                        &mut write_stream,
+                        key.clone().deref()
+                    ).await;
+                },
+                else => break
             }
         }
     }
 }
 
-async fn listen_acks(handler: StubbornLink, mut read_stream: OwnedReadHalf, key: Arc<[u8; 64]>) {
-    loop {
-        let result = wait_next_acknowledgment(&mut read_stream, key.clone()).await;
+struct AckListener {
+    link: StubbornLink,
+    stream: OwnedReadHalf,
+    key: Arc<[u8; 64]>
+}
 
-        if result.is_err() {
-            break;
+impl AckListener {
+    async fn listen_acks(&mut self) {
+        loop {
+            let Ok(ack) = self.wait_next_acknowledgment().await else { break; };
+            self.link.ack_received(ack).await;
         }
+    }
 
-        let ack = result.unwrap();
-        handler.ack_received(ack).await;
+    async fn wait_next_acknowledgment(&mut self) -> Result<Acknowledgment, ()> {
+        loop {
+            let mut buf = [0u8; 1];
+            let Ok(bytes_read) = self.stream.peek(&mut buf).await else { return Err(()) };
+            if bytes_read == 0 { return Err(()) }
+
+            let result = deserialize_ack(&mut self.stream, self.key.deref()).await;
+
+            if let Ok((ack, true)) = result {
+                return Ok(ack)
+            }
+        };
     }
 }
 
-async fn wait_next_acknowledgment(stream: &mut OwnedReadHalf, key: Arc<[u8; 64]>) -> Result<Acknowledgment, ()> {
-    loop {
-        let mut buf = [0u8; 1];
-        let result = stream.peek(&mut buf).await;
+struct StopTimer { }
 
-        if result.is_err() {
-            return Err(());
-        } else if let Ok(0) = result {
-            return Err(());
-        }
+struct TimerHandle {
+    stop_tx: Sender<StopTimer>,
+}
 
-        let result = deserialize_ack(stream, key.deref()).await;
+impl TimerHandle {
+    async fn stop(self) {
+        _ = self.stop_tx.send(StopTimer {});
+    }
 
-        if let Ok((ack, true)) = result {
-            return Ok(ack)
-        }
-    };
+    fn start_timer(message: Arc<SystemRegisterCommand>,
+                   sender: UnboundedSender<Arc<SystemRegisterCommand>>,
+                   duration: Duration) -> TimerHandle {
+        let (stop_tx, mut stop_rx) = mpsc::channel(1);
+
+        tokio::spawn(async move {
+            let mut interval = time::interval(duration);
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop_rx.recv() => break,
+                    _ = interval.tick() => sender.send(message.clone()).unwrap()
+                }
+            }
+        });
+
+        TimerHandle { stop_tx }
+    }
 }
