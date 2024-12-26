@@ -132,7 +132,7 @@ async fn concurrent_operations_on_the_same_sector() {
 async fn large_number_of_operations_execute_successfully() {
     // given
     let port_range_start = 21625;
-    let commands_total = 32;
+    let commands_total = 200;
     let config = TestProcessesConfig::new(3, port_range_start);
     config.start().await;
     let mut stream = config.connect(2).await;

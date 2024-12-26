@@ -21,7 +21,6 @@ impl TimerHandle {
 
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_millis(250));
-            interval.tick().await;
 
             loop {
                 tokio::select! {
