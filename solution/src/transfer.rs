@@ -24,6 +24,13 @@ pub enum OperationError {
     InvalidSector(u64)
 }
 
+pub fn from_success_to_response(success: OperationSuccess) -> RegisterResponse {
+    match &success.op_return {
+        OperationReturn::Read(_) => RegisterResponse::ReadResponse(OperationResult::Return(success)),
+        OperationReturn::Write => RegisterResponse::WriteResponse(OperationResult::Return(success))
+    }
+}
+
 pub async fn serialize_register_response(response: &RegisterResponse,
                                          writer: &mut (dyn AsyncWrite + Send + Unpin),
                                          hmac_key: &[u8]) -> Result<(), Error> {
@@ -74,9 +81,9 @@ fn serialize_content(response: &RegisterResponse) -> Vec<u8> {
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct Acknowledgment {
-    pub msg_type: MessageType,
-    pub process_rank: u8,
-    pub msg_ident: Uuid,
+    msg_type: MessageType,
+    process_rank: u8,
+    msg_ident: Uuid,
 }
 
 impl Acknowledgment {

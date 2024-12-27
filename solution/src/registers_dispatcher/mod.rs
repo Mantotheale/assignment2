@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use crate::{ClientRegisterCommand, RegisterClient, SectorIdx, SectorsManager, SuccessCallbackType, SystemRegisterCommand};
-use crate::registers_manager::register_queue::RegisterQueue;
+use crate::registers_dispatcher::register_queue::RegisterQueue;
 use crate::tcp_writer::TcpWriter;
 
 mod register_queue;
