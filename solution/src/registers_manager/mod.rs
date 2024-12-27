@@ -1,104 +1,93 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use crate::{ClientRegisterCommand, RegisterClient, SectorIdx, SectorsManager, SuccessCallbackType, SystemCallbackType, SystemRegisterCommand};
-use crate::registers_manager::register_handler::RegisterHandler;
+use crate::{ClientRegisterCommand, RegisterClient, SectorIdx, SectorsManager, SuccessCallbackType, SystemRegisterCommand};
+use crate::registers_manager::register_queue::RegisterQueue;
+use crate::tcp_writer::TcpWriter;
 
-mod register_handler;
+mod register_queue;
 
 #[derive(Clone)]
-pub struct RegistersManager {
+pub struct RegistersDispatcher {
     client_tx: UnboundedSender<(ClientRegisterCommand, SuccessCallbackType)>,
-    system_tx: UnboundedSender<(SystemRegisterCommand, SystemCallbackType)>
+    system_tx: UnboundedSender<(SystemRegisterCommand, Option<TcpWriter>)>
 }
 
-impl RegistersManager {
-    pub fn build(rank: u8,
+impl RegistersDispatcher {
+    pub fn build(system_tx: UnboundedSender<(SystemRegisterCommand, Option<TcpWriter>)>,
+                 system_rx: UnboundedReceiver<(SystemRegisterCommand, Option<TcpWriter>)>,
+                 rank: u8,
                  register_client: Arc<dyn RegisterClient>,
                  sectors_manager: Arc<dyn SectorsManager>,
-                 processes_count: u8) -> Self {
-        let (system_tx, system_rx) = unbounded_channel();
+                 num_processes: u8) -> Self {
         let (client_tx, client_rx) = unbounded_channel();
 
-        tokio::spawn(Self::background(
-           rank, register_client, sectors_manager, processes_count, system_rx, client_rx
-        ));
+        let mut dispatcher_background = DispatcherBackground::build(
+            client_rx, system_rx, rank, register_client, sectors_manager, num_processes
+        );
 
-        Self {
-            client_tx,
-            system_tx
-        }
+        tokio::spawn(async move { dispatcher_background.run().await; });
+
+        Self { client_tx, system_tx }
+    }
+    pub fn add_client_cmd(&self, cmd: ClientRegisterCommand, cb: SuccessCallbackType) {
+        let _ = self.client_tx.send((cmd, cb));
     }
 
-    async fn background(rank: u8,
-                        register_client: Arc<dyn RegisterClient>,
-                        sectors_manager: Arc<dyn SectorsManager>,
-                        processes_count: u8,
-                        mut system_rx: UnboundedReceiver<(SystemRegisterCommand, SystemCallbackType)>,
-                        mut client_rx: UnboundedReceiver<(ClientRegisterCommand, SuccessCallbackType)>) {
-        let mut active_registers: HashMap<SectorIdx, RegisterHandler> = HashMap::new();
+    pub fn add_system_cmd(&self, cmd: SystemRegisterCommand, writer: Option<TcpWriter>) {
+        let _ = self.system_tx.send((cmd, writer));
+    }
+}
 
+struct DispatcherBackground {
+    client_rx: UnboundedReceiver<(ClientRegisterCommand, SuccessCallbackType)>,
+    system_rx: UnboundedReceiver<(SystemRegisterCommand, Option<TcpWriter>)>,
+    active_registers: HashMap<SectorIdx, RegisterQueue>,
+
+    rank: u8,
+    register_client: Arc<dyn RegisterClient>,
+    sectors_manager: Arc<dyn SectorsManager>,
+    processes_count: u8
+}
+
+impl DispatcherBackground {
+    fn build(client_rx: UnboundedReceiver<(ClientRegisterCommand, SuccessCallbackType)>,
+             system_rx: UnboundedReceiver<(SystemRegisterCommand, Option<TcpWriter>)>,
+             rank: u8,
+             register_client: Arc<dyn RegisterClient>,
+             sectors_manager: Arc<dyn SectorsManager>,
+             processes_count: u8) -> Self {
+        Self { client_rx, system_rx, rank, register_client, sectors_manager, processes_count, active_registers: HashMap::new() }
+    }
+
+    async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some((cmd, cb)) = system_rx.recv() => {
+                Some((cmd, cb)) = self.client_rx.recv() => {
                     let idx = cmd.header.sector_idx;
-
-                    let handler = Self::get_from_idx(
-                        idx,
-                        &mut active_registers,
-                        rank,
-                        register_client.clone(),
-                        sectors_manager.clone(),
-                        processes_count
-                    ).await;
-
-                    handler.enqueue_system_cmd(cmd, cb);
+                    let queue = self.get_from_idx(idx).await;
+                    queue.add_client_cmd(cmd, cb);
                 },
-                Some((cmd, cb)) = client_rx.recv() => {
+                Some((cmd, writer)) = self.system_rx.recv() => {
                     let idx = cmd.header.sector_idx;
-
-                    let handler = Self::get_from_idx(
-                        idx,
-                        &mut active_registers,
-                        rank,
-                        register_client.clone(),
-                        sectors_manager.clone(),
-                        processes_count
-                    ).await;
-
-                    handler.enqueue_client_cmd(cmd, cb);
+                    let queue = self.get_from_idx(idx).await;
+                    queue.add_system_cmd(cmd, writer);
                 },
                 else => break
             }
         }
     }
 
-    async fn get_from_idx(idx: SectorIdx,
-                    active_registers: &mut HashMap<SectorIdx, RegisterHandler>,
-                    rank: u8,
-                    register_client: Arc<dyn RegisterClient>,
-                    sectors_manager: Arc<dyn SectorsManager>,
-                    processes_count: u8) -> RegisterHandler {
-        let opt = active_registers.get(&idx);
+    async fn get_from_idx(&mut self, idx: SectorIdx) -> RegisterQueue {
+        if let Some(queue) = self.active_registers.get(&idx) {
+            queue.clone()
+        } else {
+            let queue = RegisterQueue::build(
+                idx, self.rank, self.processes_count, self.register_client.clone(), self.sectors_manager.clone()
+            ).await;
 
-        match opt {
-            None => {
-                let handler = RegisterHandler::build(
-                    idx, rank, processes_count, register_client, sectors_manager
-                ).await;
-
-                active_registers.insert(idx, handler.clone());
-                handler
-            }
-            Some(handler) => handler.clone()
+            self.active_registers.insert(idx, queue.clone());
+            queue
         }
-    }
-
-    pub fn add_client_cmd(&self, cmd: ClientRegisterCommand, cb: SuccessCallbackType) {
-        let _ = self.client_tx.send((cmd, cb));
-    }
-
-    pub fn add_system_cmd(&self, cmd: SystemRegisterCommand, cb: SystemCallbackType) {
-        let _ = self.system_tx.send((cmd, cb));
     }
 }

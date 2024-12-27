@@ -1,21 +1,20 @@
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use hmac::Hmac;
 use sha2::Sha256;
 use tokio::io::AsyncRead;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::unbounded_channel;
 pub use domain::*;
 pub use atomic_register_public::*;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::stubborn_register_client::StubbornRegisterClient;
-use crate::registers_manager::RegistersManager;
+use crate::registers_manager::RegistersDispatcher;
 use crate::tcp_writer::TcpWriter;
-use crate::transfer::{Acknowledgment, OperationError, OperationResult, RegisterResponse};
+use crate::transfer::{OperationError, OperationResult, RegisterResponse};
 
 mod domain;
 mod transfer_public;
@@ -30,14 +29,12 @@ mod tcp_writer;
 
 type HmacSha256 = Hmac<Sha256>;
 type SuccessCallbackType = Box<dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output=()> + std::marker::Send>> + std::marker::Send + Sync>;
-type SystemCallbackType = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output=()> + std::marker::Send>> + std::marker::Send + Sync>;
 
 pub async fn run_register_process(config: Configuration) {
     let system_key = Arc::new(config.hmac_system_key);
     let client_key = Arc::new(config.hmac_client_key);
 
     let (system_tx, system_rx) = unbounded_channel();
-    let (client_tx, client_rx) = unbounded_channel();
 
     let sectors_manager = build_sectors_manager(config.public.storage_dir).await;
     let register_client = Arc::new(StubbornRegisterClient::build(config.public.tcp_locations.clone(), system_key.clone(), config.public.self_rank, system_tx.clone()));
@@ -46,14 +43,14 @@ pub async fn run_register_process(config: Configuration) {
 
     let listener = TcpListener::bind((location.0.as_str(), location.1)).await.unwrap();
 
-    let registers_manager = RegistersManager::build(
+    let registers_dispatcher = RegistersDispatcher::build(
+        system_tx,
+        system_rx,
         config.public.self_rank,
         register_client,
         sectors_manager,
         config.public.tcp_locations.len() as u8
     );
-
-    tokio::spawn(listen_commands(system_rx, client_rx, registers_manager));
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
@@ -63,25 +60,8 @@ pub async fn run_register_process(config: Configuration) {
             system_key.clone(),
             client_key.clone(),
             config.public.n_sectors,
-            config.public.self_rank,
-            system_tx.clone(),
-            client_tx.clone()
+            registers_dispatcher.clone()
         ));
-    }
-}
-
-async fn listen_commands(mut system_queue: UnboundedReceiver<(SystemRegisterCommand, SystemCallbackType)>,
-                         mut client_queue: UnboundedReceiver<(ClientRegisterCommand, SuccessCallbackType)>,
-                         registers_manager: RegistersManager) {
-    loop {
-        tokio::select! {
-            Some((cmd, cb)) = system_queue.recv() => {
-                registers_manager.add_system_cmd(cmd, cb);
-            },
-            Some((cmd, cb)) = client_queue.recv() => {
-                registers_manager.add_client_cmd(cmd, cb);
-            }
-        }
     }
 }
 
@@ -89,9 +69,7 @@ async fn handle_stream(stream: TcpStream,
                        system_key: Arc<[u8; 64]>,
                        client_key: Arc<[u8; 32]>,
                        n_sectors: u64,
-                       rank: u8,
-                       system_tx: UnboundedSender<(SystemRegisterCommand, SystemCallbackType)>,
-                       client_tx: UnboundedSender<(ClientRegisterCommand, SuccessCallbackType)>) {
+                       registers_dispatcher: RegistersDispatcher) {
     let (mut read_stream, write_stream) = stream.into_split();
     let tcp_writer = TcpWriter::build(write_stream, system_key.clone(), client_key.clone());
 
@@ -123,18 +101,10 @@ async fn handle_stream(stream: TcpStream,
                     }
                 ));
 
-                client_tx.send((command, callback)).unwrap();
+                registers_dispatcher.add_client_cmd(command, callback);
             },
             RegisterCommand::System(command) => {
-                let tcp_writer = tcp_writer.clone();
-
-                let ack = Arc::new(Acknowledgment::from_cmd(command.clone(), rank));
-
-                let callback: SystemCallbackType = Box::new(|| Box::pin(async move {
-                    tcp_writer.send_ack(*ack.deref());
-                }));
-
-                system_tx.send((command, callback)).unwrap();
+                registers_dispatcher.add_system_cmd(command, Some(tcp_writer.clone()));
             }
         }
     }
