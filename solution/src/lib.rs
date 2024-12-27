@@ -6,7 +6,6 @@ use hmac::Hmac;
 use sha2::Sha256;
 use tokio::io::AsyncRead;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 pub use domain::*;
 pub use atomic_register_public::*;
@@ -15,7 +14,8 @@ pub use sectors_manager_public::*;
 pub use transfer_public::*;
 use crate::stubborn_register_client::StubbornRegisterClient;
 use crate::registers_manager::RegistersManager;
-use crate::transfer::{Acknowledgment, OperationError, OperationResult, RegisterResponse, serialize_ack, serialize_register_response};
+use crate::tcp_writer::TcpWriter;
+use crate::transfer::{Acknowledgment, OperationError, OperationResult, RegisterResponse};
 
 mod domain;
 mod transfer_public;
@@ -26,6 +26,7 @@ mod register_client_public;
 mod stubborn_register_client;
 mod transfer;
 mod registers_manager;
+mod tcp_writer;
 
 type HmacSha256 = Hmac<Sha256>;
 type SuccessCallbackType = Box<dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output=()> + std::marker::Send>> + std::marker::Send + Sync>;
@@ -92,12 +93,7 @@ async fn handle_stream(stream: TcpStream,
                        system_tx: UnboundedSender<(SystemRegisterCommand, SystemCallbackType)>,
                        client_tx: UnboundedSender<(ClientRegisterCommand, SuccessCallbackType)>) {
     let (mut read_stream, write_stream) = stream.into_split();
-    let (client_success_tx, client_success_rx) = unbounded_channel();
-    let (system_success_tx, system_success_rx) = unbounded_channel();
-
-    tokio::spawn(handle_write(
-        client_success_rx, system_success_rx, write_stream, client_key.clone(), system_key.clone()
-    ));
+    let tcp_writer = TcpWriter::build(write_stream, system_key.clone(), client_key.clone());
 
     loop {
         let mut buf = [0u8; 1];
@@ -108,13 +104,13 @@ async fn handle_stream(stream: TcpStream,
         let (command, is_valid) = extract_next_command(&mut read_stream, &system_key, &client_key).await;
         let idx = extract_index(&command);
 
-        if !is_command_ok(&command, is_valid, idx, n_sectors, client_success_tx.clone()).await {
+        if !is_command_ok(&command, is_valid, idx, n_sectors, tcp_writer.clone()) {
             continue;
         }
 
         match command {
             RegisterCommand::Client(command) => {
-                let client_success_tx = client_success_tx.clone();
+                let tcp_writer = tcp_writer.clone();
 
                 let callback: SuccessCallbackType = Box::new(|success| Box::pin(
                     async move {
@@ -123,41 +119,23 @@ async fn handle_stream(stream: TcpStream,
                             OperationReturn::Write => RegisterResponse::WriteResponse(OperationResult::Return(success))
                         };
 
-                        client_success_tx.send(response).unwrap()
+                        tcp_writer.send_response(response);
                     }
                 ));
 
                 client_tx.send((command, callback)).unwrap();
             },
             RegisterCommand::System(command) => {
-                let system_success_tx = system_success_tx.clone();
+                let tcp_writer = tcp_writer.clone();
 
                 let ack = Arc::new(Acknowledgment::from_cmd(command.clone(), rank));
 
                 let callback: SystemCallbackType = Box::new(|| Box::pin(async move {
-                    system_success_tx.send(*ack.deref()).unwrap()
+                    tcp_writer.send_ack(*ack.deref());
                 }));
 
                 system_tx.send((command, callback)).unwrap();
             }
-        }
-    }
-}
-
-async fn handle_write(mut client_success_rx: UnboundedReceiver<RegisterResponse>,
-                      mut system_success_rx: UnboundedReceiver<Acknowledgment>,
-                      mut write_stream: OwnedWriteHalf,
-                      client_key: Arc<[u8; 32]>,
-                      system_key: Arc<[u8; 64]>) {
-    loop {
-        tokio::select! {
-            Some(response) = client_success_rx.recv() => {
-                serialize_register_response(&response, &mut write_stream, client_key.deref()).await.unwrap();
-            },
-            Some(ack) = system_success_rx.recv() => {
-                serialize_ack(&ack, &mut write_stream, system_key.deref()).await.unwrap();
-            },
-            else => break
         }
     }
 }
@@ -181,11 +159,11 @@ fn extract_index(command: &RegisterCommand) -> SectorIdx {
     }
 }
 
-async fn is_command_ok(command: &RegisterCommand,
+fn is_command_ok(command: &RegisterCommand,
                        is_hmac_valid: bool,
                        sector_idx: SectorIdx,
                        n_sectors: u64,
-                       client_success_tx: UnboundedSender<RegisterResponse>) -> bool {
+                       tcp_writer: TcpWriter) -> bool {
     if is_hmac_valid && sector_idx < n_sectors {
         return true;
     }
@@ -206,7 +184,7 @@ async fn is_command_ok(command: &RegisterCommand,
             ClientRegisterCommandContent::Write { .. } => RegisterResponse::WriteResponse(err)
         };
 
-        client_success_tx.send(response).unwrap();
+        tcp_writer.send_response(response);
     }
 
     false
